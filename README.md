@@ -104,8 +104,11 @@ pip install torch --index-url http://localhost:8081/simple --trusted-host localh
 # 设置环境变量
 export HF_ENDPOINT=http://localhost:8081
 
-# 下载模型
+# 下载模型（支持所有文件类型：.gguf, .bin, .safetensors, .json 等）
 huggingface-cli download TheBloke/Llama-2-7B-GGUF llama-2-7b.Q4_K_M.gguf
+
+# 下载整个仓库
+huggingface-cli download meta-llama/Llama-2-7b-hf --local-dir ./models
 ```
 
 或使用 Python:
@@ -113,8 +116,13 @@ huggingface-cli download TheBloke/Llama-2-7B-GGUF llama-2-7b.Q4_K_M.gguf
 import os
 os.environ["HF_ENDPOINT"] = "http://localhost:8081"
 
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, snapshot_download
+
+# 下载单个文件
 hf_hub_download(repo_id="TheBloke/Llama-2-7B-GGUF", filename="llama-2-7b.Q4_K_M.gguf")
+
+# 下载整个仓库
+snapshot_download(repo_id="meta-llama/Llama-2-7b-hf", local_dir="./models")
 ```
 
 ## 📖 API
@@ -164,9 +172,9 @@ rules:
     concurrency: 20
     chunk_size: 5242880
 
-  # HuggingFace GGUF 模型（临时签名 URL 缓存优化）
-  - name: huggingface-gguf
-    pattern: '/.*/(blob|resolve)/main/.+\.gguf$'
+  # HuggingFace 文件下载（支持所有模型文件，临时签名 URL 缓存优化）
+  - name: huggingface-files
+    pattern: '/.*/(blob|resolve)/main/.+'
     upstream: "https://huggingface.co"
     strategy: parallel
     min_size: 1048576
@@ -225,7 +233,15 @@ curl -o /dev/null "http://localhost:8081/packages/fb/d7/71b982339efc4fff3c622c6f
 **测试 HuggingFace 代理**
 ```bash
 export HF_ENDPOINT=http://localhost:8081
+
+# 测试下载 GGUF 模型文件
 huggingface-cli download TheBloke/Llama-2-7B-GGUF llama-2-7b.Q4_K_M.gguf
+
+# 测试下载 safetensors 格式模型
+huggingface-cli download meta-llama/Llama-2-7b-hf model-00001-of-00002.safetensors
+
+# 测试下载整个仓库
+huggingface-cli download sentence-transformers/all-MiniLM-L6-v2 --local-dir ./test-model
 ```
 
 **测试 Docker Registry 代理**

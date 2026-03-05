@@ -34,8 +34,8 @@ rules:
     concurrency: 20
     chunk_size: 5242880
 
-  - name: huggingface-gguf
-    pattern: '/.*/(blob|resolve)/main/.+\.gguf$'
+  - name: huggingface-files
+    pattern: '/.*/(blob|resolve)/main/.+'
     upstream: "https://huggingface.co"
     strategy: parallel
     min_size: 1024000       # 1M
