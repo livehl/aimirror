@@ -9,18 +9,28 @@ from dataclasses import dataclass
 class Rule:
     name: str
     pattern: str
+    upstream: str  # 上游源 base URL
     strategy: str  # 'proxy' or 'parallel'
     min_size: int = 0
     max_size: Optional[int] = None
     concurrency: int = 4
     chunk_size: int = 5*1024*1024
     cache_key_source: str = 'final'  # 'final' 或 'original'，用于决定缓存 key 来源
+    path_rewrite: Optional[list] = None  # 路径重写规则 [{"search": "...", "replace": "..."}]
     
     def __post_init__(self):
         self._regex = re.compile(self.pattern)
     
     def match(self, path: str) -> bool:
         return bool(self._regex.search(path))
+    
+    def build_target_url(self, path: str) -> str:
+        """构建目标 URL，应用路径重写规则"""
+        rewritten_path = path
+        if self.path_rewrite:
+            for rule in self.path_rewrite:
+                rewritten_path = rewritten_path.replace(rule['search'], rule['replace'])
+        return f"{self.upstream}{rewritten_path}"
 
 class Router:
     def __init__(self, rules: list):

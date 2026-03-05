@@ -178,41 +178,34 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
         headers={"Content-Length": str(os.path.getsize(filepath))}
     )
 
+@app.get("/health")
+async def health():
+    """健康检查端点"""
+    return {"status": "ok"}
+
+@app.get("/stats")
+async def stats():
+    """缓存统计端点"""
+    return {"cache": cache.get_stats()}
+
 @app.api_route("/{full_path:path}", methods=["GET", "HEAD", "POST", "PUT", "DELETE"])
 async def proxy_handler(request: Request, full_path: str):
     """统一代理入口"""
     logging.info(f"Received request: {request.method} {full_path}")
-    # 构建目标 URL (默认 PyPI，可扩展)
-    # 支持多 upstream，这里简化为 PyPI + Docker Hub
-    if full_path.startswith("v2/"):
-        base = "https://registry-1.docker.io"
-        target_url = f"{base}/{full_path}"
-    elif full_path.startswith("packages/") or full_path.startswith("simple/"):
-        base = "https://pypi.org"
-        target_url = f"{base}/{full_path}"
-    elif full_path.startswith("src/contrib/") and full_path.endswith(".tar.gz"):
-        # R 包路径，路由到 CRAN
-        base = "https://cran.r-project.org"
-        target_url = f"{base}/{full_path}"
-    elif "/blob/main/" in full_path or "/resolve/main/" in full_path:
-        # HuggingFace 模型文件
-        # 将 /blob/main/ 转换为 /resolve/main/ 用于实际下载
-        base = "https://huggingface.co"
-        resolved_path = full_path.replace("/blob/main/", "/resolve/main/")
-        target_url = f"{base}/{resolved_path}"
-    else:
-        # 默认 PyPI
-        base = "https://pypi.org"
-        target_url = f"{base}/{full_path}"
-    
-    logging.info(f"Target URL: {target_url}")
     
     # 路由匹配（使用 full_path 而不是 request.url.path）
-    # 先按路径匹配规则，不检查大小（大小检查在 _parallel_download 中进行）
     rule = router.match('/' + full_path, content_length=None)
     logging.info(f"Matched rule: {rule.name if rule else None}, strategy: {rule.strategy if rule else None}")
     
-    if not rule or rule.strategy == 'proxy':
+    if not rule:
+        raise HTTPException(404, "No matching rule found")
+    
+    # 构建目标 URL
+    target_url = rule.build_target_url('/' + full_path)
+    
+    logging.info(f"Target URL: {target_url}")
+    
+    if rule.strategy == 'proxy':
         logging.info("Using proxy strategy")
         return await _proxy_request(request, target_url)
     
@@ -226,14 +219,6 @@ async def proxy_handler(request: Request, full_path: str):
     
     # fallback
     return await _proxy_request(request, target_url)
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-
-@app.get("/stats")
-async def stats():
-    return {"cache": cache.get_stats()}
 
 if __name__ == "__main__":
     import uvicorn

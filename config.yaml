@@ -12,6 +12,7 @@ cache:
 rules:
   - name: docker-blob
     pattern: "/v2/.*/blobs/sha256:[a-f0-9]+"
+    upstream: "https://registry-1.docker.io"
     strategy: parallel
     min_size: 1024000      # 1M
     concurrency: 20
@@ -19,6 +20,7 @@ rules:
     
   - name: pip-wheel
     pattern: "/packages/.+\\.whl$"
+    upstream: "https://pypi.org"
     strategy: parallel
     min_size: 1024000       # 1M
     concurrency: 20
@@ -26,6 +28,7 @@ rules:
     
   - name: r-package
     pattern: "/src/contrib/.+\\.tar\\.gz$"
+    upstream: "https://cran.r-project.org"
     strategy: parallel
     min_size: 1024000       # 1M
     concurrency: 20
@@ -33,15 +36,20 @@ rules:
 
   - name: huggingface-gguf
     pattern: '/.*/(blob|resolve)/main/.+\.gguf$'
+    upstream: "https://huggingface.co"
     strategy: parallel
     min_size: 1024000       # 1M
     concurrency: 20
     chunk_size: 10485760    # 10MB per chunk
     cache_key_source: original  # 使用原始 URL 作为缓存 key（避免临时签名影响缓存命中）
+    path_rewrite:
+      - search: "/blob/main/"
+        replace: "/resolve/main/"
 
   # 示例：其他使用临时签名 URL 的站点
   # - name: example-signed-url
   #   pattern: '/signed-download/.*'
+  #   upstream: "https://example.com"
   #   strategy: parallel
   #   min_size: 10485760
   #   concurrency: 10
@@ -49,6 +57,7 @@ rules:
 
   - name: default
     pattern: ".*"
+    upstream: "https://pypi.org"
     strategy: proxy
 
 logging:
