@@ -1,0 +1,4 @@
+.qoder
+cache
+__pycache__
+*.log
