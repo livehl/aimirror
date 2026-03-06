@@ -92,9 +92,9 @@ async def _proxy_request(request: Request, target_url: str, rule: Rule = None) -
         content = await resp.aread()
         content_type = resp.headers.get('content-type', '')
         
-        # 如果是 HTML 内容，改写其中的 URL
-        if 'text/html' in content_type and rule:
-            content = _rewrite_html_urls(content, rule, request.url.path)
+        # 根据 Content-Type 改写内容中的 URL
+        if rule:
+            content = _rewrite_html_urls(content, rule, content_type)
         
         # 过滤掉可能导致问题的响应头
         response_headers = {k: v for k, v in resp.headers.items() 
@@ -105,26 +105,26 @@ async def _proxy_request(request: Request, target_url: str, rule: Rule = None) -
             headers=response_headers
         )
 
-def _rewrite_html_urls(content: bytes, rule: Rule, request_path: str) -> bytes:
-    """改写 HTML 内容中的上游 URL 为代理 URL
+def _rewrite_html_urls(content: bytes, rule: Rule, content_type: str) -> bytes:
+    """改写响应内容中的上游 URL 为代理 URL
     
     Args:
         content: 响应内容
         rule: 匹配的规则
-        request_path: 请求路径，用于匹配 rewrite_hosts 规则
+        content_type: 响应的 Content-Type
     """
-    # 如果没有配置 rewrite_hosts，不进行改写
-    if not rule.rewrite_hosts:
+    # 如果没有配置 content_rewrite，不进行改写
+    if not rule.content_rewrite:
         return content
     
-    # 查找匹配的 rewrite_host 规则
-    target_host = None
-    for rewrite_rule in rule.rewrite_hosts:
-        if rewrite_rule['path'] in request_path:
-            target_host = rewrite_rule['target']
-            break
+    # 检查 Content-Type 是否匹配
+    content_types = rule.content_rewrite.get('content_types', [])
+    if not any(ct in content_type for ct in content_types):
+        return content
     
-    if not target_host:
+    # 获取要替换的目标 host 列表
+    targets = rule.content_rewrite.get('targets', [])
+    if not targets:
         return content
     
     try:
@@ -134,12 +134,13 @@ def _rewrite_html_urls(content: bytes, rule: Rule, request_path: str) -> bytes:
         proxy_host = config['server'].get('public_host', f"127.0.0.1:{config['server']['port']}")
         proxy_base = f"http://{proxy_host}"
         
-        # 替换目标 host 为代理地址
-        text = text.replace(target_host, proxy_base)
+        # 替换所有目标 host 为代理地址
+        for target in targets:
+            text = text.replace(target, proxy_base)
         
         return text.encode('utf-8')
     except Exception as e:
-        logging.warning(f"Failed to rewrite HTML URLs: {e}")
+        logging.warning(f"Failed to rewrite content URLs: {e}")
         return content
 
 async def _file_iterator(filepath: str, chunk_size: int = 8192):

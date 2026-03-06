@@ -17,7 +17,7 @@ class Rule:
     chunk_size: int = 5*1024*1024
     cache_key_source: str = 'final'  # 'final' 或 'original'，用于决定缓存 key 来源
     path_rewrite: Optional[list] = None  # 路径重写规则 [{"search": "...", "replace": "..."}]
-    rewrite_hosts: Optional[list] = None  # HTML 链接改写规则 [{"path": "/simple", "target": "https://files.pythonhosted.org"}]
+    content_rewrite: Optional[dict] = None  # 响应内容改写配置 {"content_types": ["text/html"], "targets": ["https://files.pythonhosted.org"]}
     
     def __post_init__(self):
         self._regex = re.compile(self.pattern)
