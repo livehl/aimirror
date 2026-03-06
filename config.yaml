@@ -3,6 +3,7 @@ server:
   host: "0.0.0.0"
   port: 8081
   upstream_proxy: ""  # 上游代理，默认空表示直连
+  public_host: "127.0.0.1:8081"  # 对外访问地址，用于 HTML 链接改写
 
 cache:
   dir: "/data/fast_proxy/cache"
@@ -25,6 +26,9 @@ rules:
     min_size: 1024000       # 1M
     concurrency: 20
     chunk_size: 5242880      # 5MB per chunk
+    rewrite_hosts:           # HTML 内容中的链接改写规则
+      - path: "/simple"     # 匹配路径（请求路径包含此字符串）
+        target: "https://files.pythonhosted.org"  # 要替换的目标 host
     
   - name: r-package
     pattern: "/src/contrib/.+\\.tar\\.gz$"
@@ -59,6 +63,9 @@ rules:
     pattern: ".*"
     upstream: "https://pypi.org"
     strategy: proxy
+    rewrite_hosts:           # HTML 内容中的链接改写规则
+      - path: "/simple"     # 匹配路径（请求路径包含此字符串）
+        target: "https://files.pythonhosted.org"  # 要替换的目标 host
 
 logging:
   level: "INFO"

@@ -16,7 +16,7 @@ import httpx
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import StreamingResponse
 
-from router import Router
+from router import Router, Rule
 from cache import CacheManager
 from downloader import ParallelDownloader
 
@@ -61,6 +61,9 @@ async def lifespan(app: FastAPI):
     
     # HTTP 客户端（带代理支持）
     proxy = config['server'].get('upstream_proxy')
+    # 如果 proxy 为空字符串，设为 None
+    if not proxy:
+        proxy = None
     http_client = httpx.AsyncClient(
         timeout=httpx.Timeout(300.0),
         follow_redirects=True,
@@ -76,8 +79,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-async def _proxy_request(request: Request, target_url: str) -> Response:
-    """直接代理转发请求"""
+async def _proxy_request(request: Request, target_url: str, rule: Rule = None) -> Response:
+    """直接代理转发请求，支持内容改写"""
     headers = {k: v for k, v in request.headers.items() 
                if k.lower() not in ['host', 'connection', 'content-length']}
     
@@ -87,6 +90,12 @@ async def _proxy_request(request: Request, target_url: str) -> Response:
         follow_redirects=True
     ) as resp:
         content = await resp.aread()
+        content_type = resp.headers.get('content-type', '')
+        
+        # 如果是 HTML 内容，改写其中的 URL
+        if 'text/html' in content_type and rule:
+            content = _rewrite_html_urls(content, rule, request.url.path)
+        
         # 过滤掉可能导致问题的响应头
         response_headers = {k: v for k, v in resp.headers.items() 
                            if k.lower() not in ['content-length', 'transfer-encoding', 'content-encoding']}
@@ -95,6 +104,43 @@ async def _proxy_request(request: Request, target_url: str) -> Response:
             status_code=resp.status_code,
             headers=response_headers
         )
+
+def _rewrite_html_urls(content: bytes, rule: Rule, request_path: str) -> bytes:
+    """改写 HTML 内容中的上游 URL 为代理 URL
+    
+    Args:
+        content: 响应内容
+        rule: 匹配的规则
+        request_path: 请求路径，用于匹配 rewrite_hosts 规则
+    """
+    # 如果没有配置 rewrite_hosts，不进行改写
+    if not rule.rewrite_hosts:
+        return content
+    
+    # 查找匹配的 rewrite_host 规则
+    target_host = None
+    for rewrite_rule in rule.rewrite_hosts:
+        if rewrite_rule['path'] in request_path:
+            target_host = rewrite_rule['target']
+            break
+    
+    if not target_host:
+        return content
+    
+    try:
+        text = content.decode('utf-8')
+        
+        # 从配置中获取对外访问地址
+        proxy_host = config['server'].get('public_host', f"127.0.0.1:{config['server']['port']}")
+        proxy_base = f"http://{proxy_host}"
+        
+        # 替换目标 host 为代理地址
+        text = text.replace(target_host, proxy_base)
+        
+        return text.encode('utf-8')
+    except Exception as e:
+        logging.warning(f"Failed to rewrite HTML URLs: {e}")
+        return content
 
 async def _file_iterator(filepath: str, chunk_size: int = 8192):
     """文件流式迭代器"""
@@ -123,7 +169,7 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
     # 检查文件大小是否符合规则
     if content_length < rule.min_size:
         logging.info(f"File size {content_length} < min_size {rule.min_size}, fallback to proxy")
-        return await _proxy_request(request, target_url)
+        return await _proxy_request(request, target_url, rule)
     
     # 2. 检查缓存
     # 根据规则配置决定使用哪个 URL 作为缓存 key
@@ -207,18 +253,18 @@ async def proxy_handler(request: Request, full_path: str):
     
     if rule.strategy == 'proxy':
         logging.info("Using proxy strategy")
-        return await _proxy_request(request, target_url)
+        return await _proxy_request(request, target_url, rule)
     
     if rule.strategy == 'parallel':
         # 仅 GET/HEAD 支持并行下载
         if request.method not in ['GET', 'HEAD']:
             logging.info(f"Method {request.method} not supported for parallel, using proxy")
-            return await _proxy_request(request, target_url)
+            return await _proxy_request(request, target_url, rule)
         logging.info("Using parallel download strategy")
         return await _parallel_download(request, target_url, rule)
     
     # fallback
-    return await _proxy_request(request, target_url)
+    return await _proxy_request(request, target_url, rule)
 
 def main():
     """CLI入口点"""
