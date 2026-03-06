@@ -143,7 +143,6 @@ class ParallelDownloader:
         
         try:
             logging.info(f"Starting streaming download: {self.url}")
-            logging.info(f"Download config: chunk_size={self.chunk_size}, concurrency={self.concurrency}")
             
             async with aiohttp.ClientSession() as session:
                 # 1. 获取文件大小
