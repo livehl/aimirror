@@ -243,21 +243,29 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
             exc = download_task.exception()
             if exc:
                 raise HTTPException(502, f"Download failed: {str(exc)}")
-            # 下载完成，从缓存返回
-            cached = cache.get(cache_key, content_type)
-            if cached:
-                return StreamingResponse(
-                    _file_iterator(cached),
-                    media_type=content_type,
-                    headers={"Content-Length": str(os.path.getsize(cached))}
-                )
+            # 下载完成，等待缓存写入完成
+            for _ in range(10):  # 最多等待 5 秒
+                cached = cache.get(cache_key, content_type)
+                if cached:
+                    return StreamingResponse(
+                        _file_iterator(cached),
+                        media_type=content_type,
+                        headers={"Content-Length": str(os.path.getsize(cached))}
+                    )
+                await asyncio.sleep(0.5)
+            # 缓存还没准备好，返回 302 让客户端再试一次
+            logging.warning(f"Download done but cache not ready: {cache_key}")
         
         # 还在下载中，返回 302 让客户端稍后重试
         elapsed = asyncio.get_event_loop().time() - start_time
         logging.info(f"File downloading, returning 302: {cache_key} (elapsed: {elapsed:.1f}s)")
         return Response(
             status_code=302,
-            headers={"Location": str(request.url), "Retry-After": "3"}
+            headers={
+                "Location": str(request.url),
+                "Retry-After": "3",
+                "Cache-Control": "no-cache, no-store, must-revalidate"
+            }
         )
     
     # 5. 使用全局信号量控制并发，并开始下载
@@ -296,26 +304,65 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
             start_time = asyncio.get_event_loop().time()
             active_downloads[cache_key] = (temp_file, download_task, start_time)
             
-            # 先睡 3 秒，让下载有点进度，再返回 302
-            await asyncio.sleep(3)
-            logging.info(f"Download started, returning 302: {cache_key}")
-            return Response(
-                status_code=302,
-                headers={"Location": str(request.url), "Retry-After": "3"}
-            )
-            
+            # 每秒检测一次，下载完成立即返回，最多等待15秒
+            try:
+                for _ in range(15):
+                    await asyncio.sleep(1)
+                    
+                    # 检查下载是否完成
+                    if download_task.done():
+                        exc = download_task.exception()
+                        if exc:
+                            raise HTTPException(502, f"Download failed: {str(exc)}")
+                        # 等待缓存写入
+                        for _ in range(10):
+                            cached = cache.get(cache_key, content_type)
+                            if cached:
+                                return StreamingResponse(
+                                    _file_iterator(cached),
+                                    media_type=content_type,
+                                    headers={"Content-Length": str(os.path.getsize(cached))}
+                                )
+                            await asyncio.sleep(0.5)
+                        break  # 缓存还没好，返回302
+                
+                logging.info(f"Download not ready, returning 302: {cache_key}")
+                return Response(
+                    status_code=302,
+                    headers={
+                        "Location": str(request.url),
+                        "Retry-After": "3",
+                        "Cache-Control": "no-cache, no-store, must-revalidate"
+                    }
+                )
+            except asyncio.CancelledError:
+                # 客户端断开连接，让后台下载继续运行
+                logging.info(f"Client disconnected, download continuing in background: {cache_key}")
+                raise  # 重新抛出，让 FastAPI 处理断开连接
+            except Exception as e:
+                logging.error(f"Download failed: {e}")
+                # 清理状态
+                if cache_key in active_downloads:
+                    del active_downloads[cache_key]
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+                # 取消后台下载任务
+                if not download_task.done():
+                    download_task.cancel()
+                raise HTTPException(502, f"Download error: {str(e)}")
+        
         except Exception as e:
-            logging.error(f"Download failed: {e}")
-            if cache_key in active_downloads:
-                del active_downloads[cache_key]
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
-            raise HTTPException(502, f"Download error: {str(e)}")
+            logging.error(f"Download setup failed: {e}")
+            raise HTTPException(502, f"Download setup error: {str(e)}")
 
 @app.get("/health")
 async def health():
     """健康检查端点"""
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "active_downloads": len(active_downloads),
+        "downloads": list(active_downloads.keys())
+    }
 
 @app.get("/stats")
 async def stats():

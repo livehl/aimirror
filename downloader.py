@@ -194,16 +194,31 @@ class ParallelDownloader:
                 
                 # 等待所有下载完成
                 completed = 0
+                failed_chunks = []
+                
                 for task in asyncio.as_completed(tasks):
-                    await task
-                    completed += 1
-                    if completed % max(1, len(self.chunks) // 10) == 0 or completed == len(self.chunks):
-                        progress = completed / len(self.chunks) * 100
-                        logging.info(f"Download progress: {progress:.1f}% ({completed}/{len(self.chunks)} chunks)")
+                    try:
+                        await task
+                        completed += 1
+                        if completed % max(1, len(self.chunks) // 10) == 0 or completed == len(self.chunks):
+                            progress = completed / len(self.chunks) * 100
+                            logging.info(f"Download progress: {progress:.1f}% ({completed}/{len(self.chunks)} chunks)")
+                    except Exception as e:
+                        logging.error(f"Chunk download failed: {e}")
+                        failed_chunks.append(e)
+                
+                # 检查是否有失败的 chunk
+                if failed_chunks:
+                    raise RuntimeError(f"Download failed: {len(failed_chunks)}/{len(self.chunks)} chunks failed")
                 
                 logging.info(f"Streaming download completed: {temp_file}")
                 
-                # 5. 存入缓存
+                # 5. 验证文件完整性
+                actual_size = os.path.getsize(temp_file)
+                if actual_size != self.total_size:
+                    raise RuntimeError(f"File size mismatch: expected {self.total_size}, got {actual_size}")
+                
+                # 6. 存入缓存
                 cache.put(cache_key, temp_file, content_type)
                 
         except Exception as e:
