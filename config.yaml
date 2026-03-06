@@ -4,6 +4,7 @@ server:
   port: 8081
   upstream_proxy: ""  # 上游代理，默认空表示直连
   public_host: "127.0.0.1:8081"  # 对外访问地址，用于 HTML 链接改写
+  max_concurrent_downloads: 100  # 全局最大并发下载数，超过则排队
 
 cache:
   dir: "/data/fast_proxy/cache"
@@ -61,8 +62,10 @@ rules:
     upstream: "https://pypi.org"
     strategy: proxy
     content_rewrite:         # 响应内容改写配置
-      content_types:         # 匹配的 Content-Type
+      content_types:         # 匹配的 Content-Type（HTML 和 JSON）
         - "text/html"
+        - "application/json"
+        - "application/vnd.pypi.simple"
       targets:               # 要替换的目标 host 列表
         - "https://files.pythonhosted.org"
 

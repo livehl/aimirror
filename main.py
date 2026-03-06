@@ -36,11 +36,12 @@ config: dict = {}
 router: Router = None
 cache: CacheManager = None
 http_client: httpx.AsyncClient = None
+download_semaphore: asyncio.Semaphore = None  # 全局下载并发控制
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    global config, router, cache, http_client
+    global config, router, cache, http_client, download_semaphore
     
     # 加载配置
     config_path = Path(__file__).parent / "config.yaml"
@@ -58,6 +59,11 @@ async def lifespan(app: FastAPI):
         config['cache']['dir'],
         config['cache']['max_size_gb']
     )
+    
+    # 初始化全局下载并发控制信号量
+    max_concurrent_downloads = config.get('server', {}).get('max_concurrent_downloads', 10)
+    download_semaphore = asyncio.Semaphore(max_concurrent_downloads)
+    logging.info(f"Global download concurrency limit: {max_concurrent_downloads}")
     
     # HTTP 客户端（带代理支持）
     proxy = config['server'].get('upstream_proxy')
@@ -94,7 +100,7 @@ async def _proxy_request(request: Request, target_url: str, rule: Rule = None) -
         
         # 根据 Content-Type 改写内容中的 URL
         if rule:
-            content = _rewrite_html_urls(content, rule, content_type)
+            content = _rewrite_content_urls(content, rule, content_type)
         
         # 过滤掉可能导致问题的响应头
         response_headers = {k: v for k, v in resp.headers.items() 
@@ -105,7 +111,7 @@ async def _proxy_request(request: Request, target_url: str, rule: Rule = None) -
             headers=response_headers
         )
 
-def _rewrite_html_urls(content: bytes, rule: Rule, content_type: str) -> bytes:
+def _rewrite_content_urls(content: bytes, rule: Rule, content_type: str) -> bytes:
     """改写响应内容中的上游 URL 为代理 URL
     
     Args:
@@ -117,7 +123,7 @@ def _rewrite_html_urls(content: bytes, rule: Rule, content_type: str) -> bytes:
     if not rule.content_rewrite:
         return content
     
-    # 检查 Content-Type 是否匹配
+    # 检查 Content-Type 是否匹配（支持 HTML 和 JSON）
     content_types = rule.content_rewrite.get('content_types', [])
     if not any(ct in content_type for ct in content_types):
         return content
@@ -150,80 +156,83 @@ async def _file_iterator(filepath: str, chunk_size: int = 8192):
             yield chunk
 
 async def _parallel_download(request: Request, target_url: str, rule) -> Response:
-    """并行下载 + 缓存策略"""
+    """并行下载 + 缓存策略（带全局并发控制）"""
     logging.info(f"Entering _parallel_download for: {target_url}")
-    # 1. 先 HEAD 获取文件大小和内容类型，跟随重定向
-    # 带上客户端的 Authorization header（用于 Docker Registry 认证）
-    headers = {}
-    auth_header = request.headers.get('authorization')
-    if auth_header:
-        headers['Authorization'] = auth_header
     
-    head_resp = await http_client.head(target_url, headers=headers, follow_redirects=True)
-    # 获取最终 URL（如果有重定向）
-    final_url = str(head_resp.url)
-    logging.info(f"Final URL after redirect: {final_url}")
-    content_length = int(head_resp.headers.get('content-length', 0))
-    content_type = head_resp.headers.get('content-type', '')
-    logging.info(f"HEAD response: content_length={content_length}, content_type={content_type}")
-    
-    # 检查文件大小是否符合规则
-    if content_length < rule.min_size:
-        logging.info(f"File size {content_length} < min_size {rule.min_size}, fallback to proxy")
-        return await _proxy_request(request, target_url, rule)
-    
-    # 2. 检查缓存
-    # 根据规则配置决定使用哪个 URL 作为缓存 key
-    # target_url 是原始请求 URL，final_url 是重定向后的 URL（可能包含临时签名）
-    cache_key_source = getattr(rule, 'cache_key_source', 'final')
-    if cache_key_source == 'original':
-        cache_key = target_url
-        logging.info(f"Using original URL as cache key: {cache_key}")
-    else:
-        cache_key = final_url
-    
-    cached = cache.get(cache_key, content_type)
-    if cached:
-        logging.info(f"Cache HIT: {cache_key}")
-        return StreamingResponse(
-            _file_iterator(cached),
-            media_type=content_type,
-            headers={"Content-Length": str(os.path.getsize(cached))}
+    # 使用全局信号量控制总并发数
+    async with download_semaphore:
+        # 1. 先 HEAD 获取文件大小和内容类型，跟随重定向
+        # 带上客户端的 Authorization header（用于 Docker Registry 认证）
+        headers = {}
+        auth_header = request.headers.get('authorization')
+        if auth_header:
+            headers['Authorization'] = auth_header
+        
+        head_resp = await http_client.head(target_url, headers=headers, follow_redirects=True)
+        # 获取最终 URL（如果有重定向）
+        final_url = str(head_resp.url)
+        logging.info(f"Final URL after redirect: {final_url}")
+        content_length = int(head_resp.headers.get('content-length', 0))
+        content_type = head_resp.headers.get('content-type', '')
+        logging.info(f"HEAD response: content_length={content_length}, content_type={content_type}")
+        
+        # 检查文件大小是否符合规则
+        if content_length < rule.min_size:
+            logging.info(f"File size {content_length} < min_size {rule.min_size}, fallback to proxy")
+            return await _proxy_request(request, target_url, rule)
+        
+        # 2. 检查缓存
+        # 根据规则配置决定使用哪个 URL 作为缓存 key
+        # target_url 是原始请求 URL，final_url 是重定向后的 URL（可能包含临时签名）
+        cache_key_source = getattr(rule, 'cache_key_source', 'final')
+        if cache_key_source == 'original':
+            cache_key = target_url
+            logging.info(f"Using original URL as cache key: {cache_key}")
+        else:
+            cache_key = final_url
+        
+        cached = cache.get(cache_key, content_type)
+        if cached:
+            logging.info(f"Cache HIT: {cache_key}")
+            return StreamingResponse(
+                _file_iterator(cached),
+                media_type=content_type,
+                headers={"Content-Length": str(os.path.getsize(cached))}
+            )
+        
+        # 3. 并行下载（使用最终 URL）
+        logging.info(f"Cache MISS, parallel download: {final_url} (size: {content_length} bytes)")
+        # 使用 URL 的 hash 作为文件名，避免 URL 参数导致文件名过长
+        url_hash = hashlib.sha256(cache_key.encode()).hexdigest()[:16]
+        temp_file = os.path.join(config['cache']['dir'], f"tmp_{url_hash}")
+        
+        # 如果有 Authorization header，需要传递给下载器
+        downloader = ParallelDownloader(
+            url=final_url,
+            filepath=temp_file,
+            concurrency=rule.concurrency,
+            chunk_size=rule.chunk_size,
+            proxy=config['server'].get('upstream_proxy'),
+            headers=headers if auth_header else None
         )
-    
-    # 3. 并行下载（使用最终 URL）
-    logging.info(f"Cache MISS, parallel download: {final_url} (size: {content_length} bytes)")
-    # 使用 URL 的 hash 作为文件名，避免 URL 参数导致文件名过长
-    url_hash = hashlib.sha256(cache_key.encode()).hexdigest()[:16]
-    temp_file = os.path.join(config['cache']['dir'], f"tmp_{url_hash}")
-    
-    # 如果有 Authorization header，需要传递给下载器
-    downloader = ParallelDownloader(
-        url=final_url,
-        filepath=temp_file,
-        concurrency=rule.concurrency,
-        chunk_size=rule.chunk_size,
-        proxy=config['server'].get('upstream_proxy'),
-        headers=headers if auth_header else None
-    )
-    
-    try:
-        filepath = await downloader.download()
-    except Exception as e:
-        logging.error(f"Download failed: {e}")
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
-        raise HTTPException(502, f"Download error: {str(e)}")
-    
-    # 4. 存入缓存（使用 cache_key）
-    cache.put(cache_key, filepath, content_type)
-    
-    # 5. 流式返回内容
-    return StreamingResponse(
-        _file_iterator(filepath),
-        media_type=content_type,
-        headers={"Content-Length": str(os.path.getsize(filepath))}
-    )
+        
+        try:
+            filepath = await downloader.download()
+        except Exception as e:
+            logging.error(f"Download failed: {e}")
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+            raise HTTPException(502, f"Download error: {str(e)}")
+        
+        # 4. 存入缓存（使用 cache_key）
+        cache.put(cache_key, filepath, content_type)
+        
+        # 5. 流式返回内容
+        return StreamingResponse(
+            _file_iterator(filepath),
+            media_type=content_type,
+            headers={"Content-Length": str(os.path.getsize(filepath))}
+        )
 
 @app.get("/health")
 async def health():
