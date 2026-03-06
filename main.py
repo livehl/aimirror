@@ -261,16 +261,58 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
                 await asyncio.sleep(0.5)
             # 缓存还没准备好，返回 302 让客户端再试一次
             logging.warning(f"Download done but cache not ready: {cache_key}")
+            return Response(
+                status_code=302,
+                headers={
+                    "Location": str(request.url),
+                    "Cache-Control": "no-cache, no-store, must-revalidate"
+                }
+            )
         
-        # 还在下载中，返回 202 让客户端稍后重试
+        # 还在下载中，长轮询等待（最多20秒）
         elapsed = asyncio.get_event_loop().time() - start_time
-        # 如果已经等了很久，给更长的重试时间
-        retry_after = "10" if elapsed > 30 else "5" if elapsed > 10 else "2"
-        logging.info(f"File downloading, returning 202: {cache_key} (elapsed: {elapsed:.1f}s, retry: {retry_after}s)")
+        logging.info(f"File downloading, long polling: {cache_key} (elapsed: {elapsed:.1f}s)")
+        
+        # 长轮询：每0.5秒检查一次，最多20秒
+        max_wait = 20  # 最大等待20秒
+        poll_interval = 0.5
+        poll_count = int(max_wait / poll_interval)
+        
+        for _ in range(poll_count):
+            await asyncio.sleep(poll_interval)
+            
+            # 检查下载是否完成
+            if download_task.done():
+                exc = download_task.exception()
+                if exc:
+                    raise HTTPException(502, f"Download failed: {str(exc)}")
+                # 等待缓存写入完成（最多5秒）
+                for _ in range(10):
+                    cached = cache.get(cache_key, content_type)
+                    if cached:
+                        logging.info(f"Download ready after polling: {cache_key}")
+                        return StreamingResponse(
+                            _file_iterator(cached),
+                            media_type=content_type,
+                            headers={"Content-Length": str(os.path.getsize(cached))}
+                        )
+                    await asyncio.sleep(0.5)
+                # 下载完成但缓存还没好，返回302重试
+                logging.warning(f"Download done but cache not ready after polling: {cache_key}")
+                return Response(
+                    status_code=302,
+                    headers={
+                        "Location": str(request.url),
+                        "Cache-Control": "no-cache, no-store, must-revalidate"
+                    }
+                )
+        
+        # 20秒到了还没完成，返回302让客户端重试
+        logging.info(f"Long polling timeout (20s), returning 302: {cache_key}")
         return Response(
-            status_code=202,
+            status_code=302,
             headers={
-                "Retry-After": retry_after,
+                "Location": str(request.url),
                 "Cache-Control": "no-cache, no-store, must-revalidate"
             }
         )
@@ -437,11 +479,11 @@ def main():
         workers=1,  # 单进程多线程模式（适合IO密集型）
         loop="uvloop",  # 使用 uvloop 提高性能
         http="httptools",  # 使用 httptools 提高HTTP解析性能
-        # 连接优化
-        backlog=2048,  # TCP连接队列大小
-        limit_concurrency=500,  # 最大并发连接数
+        # 连接优化 - 支持大规模长轮询连接
+        backlog=4096,  # TCP连接队列大小（增大以支持更多排队连接）
+        limit_concurrency=2000,  # 最大并发连接数（支持大量长轮询连接hold住）
         limit_max_requests=10000,  # 每个连接最大请求数
-        timeout_keep_alive=30,  # 保持连接超时时间
+        timeout_keep_alive=60,  # 保持连接超时时间（必须大于长轮询20秒）
     )
 
 if __name__ == "__main__":
