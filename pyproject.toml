@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aimirror"
-version = "0.1.7"
+version = "0.1.8"
 description = "AI时代的下载镜像加速器 - 支持Docker/PyPI/HuggingFace的多线程加速下载代理"
 readme = "README.md"
 license = {text = "MIT"}

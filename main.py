@@ -205,17 +205,22 @@ async def _streaming_file_iterator(filepath: str, download_task: asyncio.Task, t
 async def _parallel_download(request: Request, target_url: str, rule) -> Response:
     """并行下载 + 缓存策略（带全局并发控制和流式返回）"""
     logging.info(f"Entering _parallel_download for: {target_url}")
+    logging.info(f"Rule: name={rule.name}, strategy={rule.strategy}, chunk_size={rule.chunk_size}, concurrency={rule.concurrency}")
     
     # 1. 先 HEAD 获取文件大小和内容类型，跟随重定向
+    # 带上客户端的 Authorization header（用于 Docker Registry 认证）
     headers = {}
     auth_header = request.headers.get('authorization')
     if auth_header:
         headers['Authorization'] = auth_header
     
     head_resp = await http_client.head(target_url, headers=headers, follow_redirects=True)
+    # 获取最终 URL（如果有重定向）
     final_url = str(head_resp.url)
+    logging.info(f"Final URL after redirect: {final_url}")
     content_length = int(head_resp.headers.get('content-length', 0))
     content_type = head_resp.headers.get('content-type', '')
+    logging.info(f"HEAD response: content_length={content_length}, content_type={content_type}")
     
     # 检查文件大小是否符合规则
     if content_length < rule.min_size:
@@ -228,6 +233,7 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
     # 3. 检查缓存
     cached = cache.get(cache_key, content_type)
     if cached:
+        logging.info(f"Cache HIT: {cache_key}")
         return StreamingResponse(
             _file_iterator(cached),
             media_type=content_type,
