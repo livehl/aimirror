@@ -1,0 +1,4 @@
+include config.yaml
+include README.md
+include LICENSE
+recursive-include cache .gitkeep

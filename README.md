@@ -3,6 +3,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![PyPI](https://img.shields.io/badge/PyPI-aimirror-blue)](https://pypi.org/project/aimirror/)
 
 > AI 时代的下载镜像加速器 —— 被慢速网络逼疯的工程师的自救工具
 
@@ -74,8 +75,27 @@ flowchart LR
 
 ## 🚀 快速开始
 
+### 方式一：pip 安装（推荐）
+
 ```bash
 # 安装
+pip install aimirror
+
+# 启动
+aimirror
+
+# 使用
+curl http://localhost:8081/health
+```
+
+### 方式二：源码安装
+
+```bash
+# 克隆仓库
+git clone https://github.com/livehl/aimirror.git
+cd aimirror
+
+# 安装依赖
 pip install -r requirements.txt
 
 # 启动
@@ -136,7 +156,11 @@ snapshot_download(repo_id="meta-llama/Llama-2-7b-hf", local_dir="./models")
 ## 🐳 Docker 部署
 
 ```bash
-# 使用 GitHub Container Registry
+# 使用 PyPI 安装（推荐）
+pip install aimirror
+aimirror
+
+# 或使用 GitHub Container Registry
 docker pull ghcr.io/livehl/aimirror:latest
 
 # 运行

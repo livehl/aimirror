@@ -220,7 +220,8 @@ async def proxy_handler(request: Request, full_path: str):
     # fallback
     return await _proxy_request(request, target_url)
 
-if __name__ == "__main__":
+def main():
+    """CLI入口点"""
     import uvicorn
     # 加载配置
     config_path = Path(__file__).parent / "config.yaml"
@@ -233,3 +234,6 @@ if __name__ == "__main__":
         port=config['server']['port'],
         log_level="info"
     )
+
+if __name__ == "__main__":
+    main()

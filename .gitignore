@@ -2,3 +2,6 @@
 cache
 __pycache__
 *.log
+.pypirc
+dist
+*.egg-info

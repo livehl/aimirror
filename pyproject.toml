@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aimirror"
+version = "0.1.1"
+description = "AI时代的下载镜像加速器 - 支持Docker/PyPI/HuggingFace的多线程加速下载代理"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "huanglin", email = "huanglingg@gmail.com"}
+]
+keywords = ["proxy", "download", "accelerator", "docker", "pypi", "huggingface", "cache"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: Proxy Servers",
+    "Topic :: System :: Networking",
+    "Topic :: Utilities",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.23.0",
+    "httpx[http2]>=0.25.0",
+    "aiohttp>=3.9.0",
+    "aiofiles>=23.0.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "build",
+    "twine",
+]
+
+[project.scripts]
+aimirror = "main:main"
+
+[project.urls]
+Homepage = "https://github.com/livehl/aimirror"
+Repository = "https://github.com/livehl/aimirror"
+Issues = "https://github.com/livehl/aimirror/issues"
+
+[tool.setuptools]
+py-modules = ["main", "router", "cache", "downloader"]
