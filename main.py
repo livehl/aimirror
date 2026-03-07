@@ -120,66 +120,11 @@ async def _proxy_request(request: Request, target_url: str, rule: Rule = None) -
         # 合并 huggingface 元数据头部
         response_headers.update(hf_meta_headers)
         
-        # 改写 WWW-Authenticate 头（用于 Docker Registry 认证）
-        if rule and rule.header_rewrite:
-            www_auth = response_headers.get('www-authenticate')
-            if www_auth:
-                response_headers['www-authenticate'] = _rewrite_www_authenticate(www_auth, rule.header_rewrite)
-        
         return Response(
             content=content,
             status_code=resp.status_code,
             headers=response_headers
         )
-
-def _rewrite_www_authenticate(www_auth: str, header_rewrite: dict) -> str:
-    """改写 WWW-Authenticate 头中的 realm URL
-    
-    Args:
-        www_auth: 原始的 WWW-Authenticate 头值，如：Bearer realm="https://auth.docker.io/token",service="registry.docker.io"
-        header_rewrite: 头改写配置 {"realm": "https://auth.docker.io/token"}
-    
-    Returns:
-        改写后的 WWW-Authenticate 头值
-    """
-    try:
-        import re
-        from urllib.parse import urlparse, urlunparse
-        
-        # 从全局配置获取 public_host
-        public_host = config['server'].get('public_host', f"127.0.0.1:{config['server']['port']}")
-        
-        # 改写 realm
-        realm_target = header_rewrite.get('realm')
-        
-        if realm_target:
-            realm_match = re.search(r'realm="([^"]+)"', www_auth)
-            if realm_match:
-                original_realm = realm_match.group(1)
-                
-                # 检查 realm 是否匹配目标
-                if realm_target in original_realm:
-                    parsed = urlparse(original_realm)
-                    
-                    # 构建新的 realm URL（保持 path 和 query 不变）
-                    new_realm = urlunparse((
-                        parsed.scheme,
-                        public_host,  # 替换为 public_host
-                        parsed.path,
-                        parsed.params,
-                        parsed.query,
-                        parsed.fragment
-                    ))
-                    
-                    # 替换 realm URL
-                    new_www_auth = www_auth.replace(f'realm="{original_realm}"', f'realm="{new_realm}"')
-                    logging.info(f"Rewrote WWW-Authenticate realm: {original_realm} -> {new_realm}")
-                    return new_www_auth
-        
-        return www_auth
-    except Exception as e:
-        logging.warning(f"Failed to rewrite WWW-Authenticate header: {e}")
-        return www_auth
 
 
 def _rewrite_content_urls(content: bytes, rule: Rule, content_type: str) -> bytes:
@@ -500,10 +445,186 @@ async def stats():
     """缓存统计端点"""
     return {"cache": cache.get_stats()}
 
+def _parse_www_authenticate(authenticate_str: str) -> dict:
+    """解析 WWW-Authenticate 头
+    示例: Bearer realm="https://auth.docker.io/token",service="registry.docker.io"
+    """
+    import re
+    # 匹配 "=" 后的引号内容
+    matches = re.findall(r'([a-zA-Z]+)="([^"]*)"', authenticate_str)
+    return {k: v for k, v in matches}
+
+
+def _make_www_authenticate_realm(public_host: str, is_https: bool = True) -> str:
+    """构建改写后的 WWW-Authenticate 头，指向代理的 /v2/auth"""
+    scheme = "https" if is_https else "http"
+    return f'Bearer realm="{scheme}://{public_host}/v2/auth",service="docker-proxy"'
+
+
+async def _handle_docker_auth(request: Request, upstream: str) -> Response:
+    """处理 Docker Registry 认证请求
+    
+    1. 向上游 /v2/ 发送请求获取 WWW-Authenticate
+    2. 解析 realm 和 service
+    3. 代理 token 请求
+    """
+    # 获取上游的认证信息
+    upstream_url = f"{upstream}/v2/"
+    headers = {}
+    auth_header = request.headers.get('authorization')
+    if auth_header:
+        headers['Authorization'] = auth_header
+    
+    resp = await http_client.get(upstream_url, headers=headers, follow_redirects=True)
+    
+    if resp.status_code != 401:
+        # 不需要认证，直接返回
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers={k: v for k, v in resp.headers.items() 
+                    if k.lower() not in ['content-length', 'transfer-encoding', 'content-encoding']}
+        )
+    
+    www_auth = resp.headers.get('www-authenticate')
+    if not www_auth:
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers={k: v for k, v in resp.headers.items() 
+                    if k.lower() not in ['content-length', 'transfer-encoding', 'content-encoding']}
+        )
+    
+    # 解析 WWW-Authenticate
+    auth_info = _parse_www_authenticate(www_auth)
+    realm = auth_info.get('realm')
+    service = auth_info.get('service', '')
+    
+    if not realm:
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers={k: v for k, v in resp.headers.items() 
+                    if k.lower() not in ['content-length', 'transfer-encoding', 'content-encoding']}
+        )
+    
+    # 构建 token URL
+    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+    realm_url = urlparse(realm)
+    
+    # 获取 scope 参数
+    scope = request.query_params.get('scope', '')
+    
+    # 构建新的查询参数
+    query_params = parse_qs(realm_url.query)
+    query_params['service'] = [service]
+    if scope:
+        query_params['scope'] = [scope]
+    
+    new_query = urlencode(query_params, doseq=True)
+    token_url = urlunparse((
+        realm_url.scheme,
+        realm_url.netloc,
+        realm_url.path,
+        realm_url.params,
+        new_query,
+        realm_url.fragment
+    ))
+    
+    logging.info(f"Fetching token from: {token_url}")
+    
+    # 请求 token
+    token_headers = {}
+    if auth_header:
+        token_headers['Authorization'] = auth_header
+    
+    token_resp = await http_client.get(token_url, headers=token_headers, follow_redirects=True)
+    
+    return Response(
+        content=token_resp.content,
+        status_code=token_resp.status_code,
+        headers={k: v for k, v in token_resp.headers.items() 
+                if k.lower() not in ['content-length', 'transfer-encoding', 'content-encoding']}
+    )
+
+
 @app.api_route("/{full_path:path}", methods=["GET", "HEAD", "POST", "PUT", "DELETE"])
 async def proxy_handler(request: Request, full_path: str):
     """统一代理入口"""
     logging.info(f"Received request: {request.method} {full_path}")
+    
+    # 获取 public_host 配置
+    public_host = config['server'].get('public_host', f"127.0.0.1:{config['server']['port']}")
+    
+    # === Docker Registry 特殊处理 ===
+    # 1. 处理 /v2/auth - token 代理
+    if full_path == "v2/auth" or full_path.startswith("v2/auth"):
+        # 从配置中找到 docker registry 上游
+        docker_upstream = None
+        for rule in router.rules:
+            if rule.name == "docker-registry":
+                docker_upstream = rule.upstream
+                break
+        if docker_upstream:
+            return await _handle_docker_auth(request, docker_upstream)
+    
+    # 2. 处理 /v2/ - 检查认证并改写 401 响应
+    if full_path == "v2/" or full_path == "v2":
+        # 从配置中找到 docker registry 上游
+        docker_upstream = None
+        for rule in router.rules:
+            if rule.name == "docker-registry":
+                docker_upstream = rule.upstream
+                break
+        if docker_upstream:
+            upstream_url = f"{docker_upstream}/v2/"
+            headers = {}
+            auth_header = request.headers.get('authorization')
+            if auth_header:
+                headers['Authorization'] = auth_header
+            
+            resp = await http_client.get(upstream_url, headers=headers, follow_redirects=True)
+            
+            if resp.status_code == 401:
+                # 返回自定义 401，让客户端向我们的 /v2/auth 请求 token
+                is_https = request.url.scheme == "https"
+                www_auth = _make_www_authenticate_realm(public_host, is_https)
+                return Response(
+                    content=b'{"errors":[{"code":"UNAUTHORIZED","message":"authentication required"}]}',
+                    status_code=401,
+                    headers={
+                        'Content-Type': 'application/json',
+                        'WWW-Authenticate': www_auth
+                    }
+                )
+            
+            # 不需要认证，直接返回上游响应
+            return Response(
+                content=resp.content,
+                status_code=resp.status_code,
+                headers={k: v for k, v in resp.headers.items() 
+                        if k.lower() not in ['content-length', 'transfer-encoding', 'content-encoding']}
+            )
+    
+    # 3. 处理 DockerHub library 镜像重定向
+    # /v2/busybox/manifests/latest => /v2/library/busybox/manifests/latest
+    # 注意：只处理没有 namespace 的官方镜像（如 ubuntu, nginx 等）
+    if full_path.startswith("v2/"):
+        path_parts = full_path.split("/")
+        # 官方镜像路径格式: v2/{repo}/manifests/{tag} 或 v2/{repo}/blobs/{digest}
+        # 即 4 个部分: ['v2', 'repo', 'manifests|blobs', 'reference']
+        if len(path_parts) == 4 and path_parts[2] in ['manifests', 'blobs']:
+            repo = path_parts[1]
+            # 如果 repo 不包含 / 且不是以 library/ 开头，说明是官方镜像需要重定向
+            if "/" not in repo and not repo.startswith("library"):
+                # 重定向到 library/ 路径
+                new_path = f"/v2/library/{repo}/{path_parts[2]}/{path_parts[3]}"
+                logging.info(f"Redirecting library image: /{full_path} -> {new_path}")
+                return Response(
+                    status_code=301,
+                    headers={"Location": f"{request.url.scheme}://{public_host}{new_path}"}
+                )
+    # === Docker Registry 特殊处理结束 ===
     
     # 路由匹配（使用 full_path 而不是 request.url.path）
     rule = router.match('/' + full_path, content_length=None)

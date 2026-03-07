@@ -210,7 +210,7 @@ def test_end_to_end():
             'url': 'http://localhost:8081/v2/library/nginx/blobs/sha256:206356c42440674ecbdf1070cf70ce8ef7885ac2e5c56f1ecf800b758f6b0419',
             'min_size': 1000000,  # 1MB+
             'auth_required': True,  # 需要 Bearer Token 认证
-            'auth_url': 'https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/nginx:pull'
+            'auth_url': 'http://localhost:8081/token?service=registry.docker.io&scope=repository:library/nginx:pull'
         },
         {
             'name': 'HuggingFace GGUF',

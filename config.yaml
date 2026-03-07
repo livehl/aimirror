@@ -12,7 +12,7 @@ cache:
   lru_enabled: true
 
 rules:
-  # Docker Registry API 路由（注意：精确规则在前，宽泛规则在后）
+  # Docker Registry 代理（/v2/ 和 /v2/auth 在代码中特殊处理）
   - name: docker-blob
     pattern: "/v2/.*/blobs/sha256:[a-f0-9]+"
     upstream: "https://registry-1.docker.io"
@@ -20,17 +20,9 @@ rules:
     min_size: 1       # all
     concurrency: 20
     chunk_size: 10485760     # 10MB per chunk
-
   - name: docker-registry
     pattern: "/v2/.*"
     upstream: "https://registry-1.docker.io"
-    strategy: proxy
-    header_rewrite:
-      realm: "https://auth.docker.io/token"
-
-  - name: docker-auth
-    pattern: "/token.*"
-    upstream: "https://auth.docker.io"
     strategy: proxy
     
   - name: pip-packages
