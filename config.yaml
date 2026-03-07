@@ -2,8 +2,8 @@
 server:
   host: "0.0.0.0"
   port: 8081
-  upstream_proxy: ""  # 上游代理，默认空表示直连
-  public_host: "127.0.0.1:8081"  # 对外访问地址，用于 HTML 链接改写
+  upstream_proxy: "http://192.168.10.3:7890"  # 上游代理，默认空表示直连
+  public_host: "docker.aixhx.cn"  # 对外访问地址，用于 HTML 链接改写
   max_concurrent_downloads: 100  # 全局最大并发下载数，超过则排队
 
 cache:
