@@ -120,11 +120,81 @@ async def _proxy_request(request: Request, target_url: str, rule: Rule = None) -
         # 合并 huggingface 元数据头部
         response_headers.update(hf_meta_headers)
         
+        # 改写 WWW-Authenticate 头（用于 Docker Registry 认证）
+        if rule and rule.header_rewrite:
+            www_auth = response_headers.get('www-authenticate')
+            if www_auth:
+                response_headers['www-authenticate'] = _rewrite_www_authenticate(www_auth, rule.header_rewrite)
+        
         return Response(
             content=content,
             status_code=resp.status_code,
             headers=response_headers
         )
+
+def _rewrite_www_authenticate(www_auth: str, header_rewrite: dict) -> str:
+    """改写 WWW-Authenticate 头中的 realm 和 service
+    
+    Args:
+        www_auth: 原始的 WWW-Authenticate 头值，如：Bearer realm="https://auth.docker.io/token",service="registry.docker.io"
+        header_rewrite: 头改写配置 {"realm": "https://auth.docker.io/token", "service": "registry.docker.io"}
+    
+    Returns:
+        改写后的 WWW-Authenticate 头值
+    """
+    try:
+        import re
+        from urllib.parse import urlparse, urlunparse
+        
+        new_www_auth = www_auth
+        
+        # 从全局配置获取 public_host
+        public_host = config['server'].get('public_host', f"127.0.0.1:{config['server']['port']}")
+        
+        # 1. 改写 realm
+        realm_target = header_rewrite.get('realm')
+        
+        if realm_target:
+            realm_match = re.search(r'realm="([^"]+)"', new_www_auth)
+            if realm_match:
+                original_realm = realm_match.group(1)
+                
+                # 检查 realm 是否匹配目标
+                if realm_target in original_realm:
+                    parsed = urlparse(original_realm)
+                    
+                    # 构建新的 realm URL（保持 path 和 query 不变）
+                    new_realm = urlunparse((
+                        parsed.scheme,
+                        public_host,  # 替换为 public_host
+                        parsed.path,
+                        parsed.params,
+                        parsed.query,
+                        parsed.fragment
+                    ))
+                    
+                    # 替换 realm URL
+                    new_www_auth = new_www_auth.replace(f'realm="{original_realm}"', f'realm="{new_realm}"')
+                    logging.info(f"Rewrote WWW-Authenticate realm: {original_realm} -> {new_realm}")
+        
+        # 2. 改写 service（如果配置了）
+        service_target = header_rewrite.get('service')
+        if service_target:
+            service_match = re.search(r'service="([^"]+)"', new_www_auth)
+            if service_match:
+                original_service = service_match.group(1)
+                
+                # 检查 service 是否匹配目标
+                if service_target == original_service:
+                    # 替换 service 为 public_host
+                    new_www_auth = new_www_auth.replace(f'service="{original_service}"', f'service="{public_host}"')
+                    logging.info(f"Rewrote WWW-Authenticate service: {original_service} -> {public_host}")
+        
+        return new_www_auth
+    except Exception as e:
+        logging.warning(f"Failed to rewrite WWW-Authenticate header: {e}")
+        return www_auth
+
 
 def _rewrite_content_urls(content: bytes, rule: Rule, content_type: str) -> bytes:
     """改写响应内容中的上游 URL 为代理 URL
