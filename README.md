@@ -287,9 +287,9 @@ curl http://localhost:8081/stats | jq
 
 响应包含缓存目录的总大小、文件数量等信息。
 
-## 🐳 Docker 部署
+## 🚀 快速开始
 
-### 使用 PyPI 安装（推荐）
+### 方式一：pip 安装（推荐）
 
 ```bash
 # 安装
@@ -297,7 +297,29 @@ pip install aimirror
 
 # 启动
 aimirror
+
+# 使用
+curl http://localhost:8081/health
 ```
+
+### 方式二：源码安装
+
+```bash
+# 克隆仓库
+git clone https://github.com/livehl/aimirror.git
+cd aimirror
+
+# 安装依赖
+pip install -r requirements.txt
+
+# 启动
+python main.py
+
+# 使用
+curl http://localhost:8081/health
+```
+
+## 🐳 Docker 部署
 
 ### 使用 GitHub Container Registry
 
@@ -313,13 +335,6 @@ docker run -d -p 8081:8081 \
 # 运行（带自定义配置）
 docker run -d -p 8081:8081 \
   -v $(pwd)/config.yaml:/app/config.yaml \
-  -v $(pwd)/cache:/data/fast_proxy/cache \
-  ghcr.io/livehl/aimirror:latest
-
-# 运行（带上游代理）
-docker run -d -p 8081:8081 \
-  -e HTTP_PROXY=http://proxy.company.com:8080 \
-  -e HTTPS_PROXY=http://proxy.company.com:8080 \
   -v $(pwd)/cache:/data/fast_proxy/cache \
   ghcr.io/livehl/aimirror:latest
 ```
@@ -339,12 +354,10 @@ services:
       - ./config.yaml:/app/config.yaml
       - ./cache:/data/fast_proxy/cache
       - ./logs:/data/fast_proxy
-    environment:
-      # 可选：通过环境变量设置代理
-      - HTTP_PROXY=http://proxy.company.com:8080
-      - HTTPS_PROXY=http://proxy.company.com:8080
     restart: unless-stopped
 ```
+
+> **注意**：上游代理请在 `config.yaml` 中配置 `server.upstream_proxy`，不支持环境变量方式。
 
 ## ⚙️ 配置示例
 
