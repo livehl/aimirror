@@ -11,49 +11,106 @@ cache:
   max_size_gb: 100
   lru_enabled: true
 
+# 全局内容改写配置（所有响应都会应用）
+content_rewrite:
+  content_types:         # 匹配的 Content-Type
+    - "text/html"
+    - "application/json"
+    - "application/vnd.pypi.simple"
+  targets:               # 要替换为目标代理地址的上游 host 列表
+    - "https://files.pythonhosted.org"
+    - "https://pypi.org"
+    - "https://download.pytorch.org"
+    - "https://download-r2.pytorch.org"
+    - "https://pypi.nvidia.com"
+
 rules:
+  # ========== PyPI 相关规则 ==========
+  # PyPI 简单索引 /simple/
+  - name: pypi-simple
+    path_prefix: "/simple"
+    upstream: "https://pypi.org"
+    strategy: proxy
+
+  # PyPI 包文件 /packages/
+  - name: pypi-packages
+    path_prefix: "/packages"
+    upstream: "https://files.pythonhosted.org"
+    strategy: parallel
+    min_size: 1
+    concurrency: 20
+    chunk_size: 5242880      # 5MB per chunk
+
+  # ========== NVIDIA CUDA 包规则 ==========
+  # NVIDIA PyPI 代理 /nvidia/ -> pypi.nvidia.com/（移除 /nvidia 前缀）
+  - name: nvidia-packages
+    path_prefix: "/nvidia"
+    upstream: "https://pypi.nvidia.com"
+    strategy: parallel
+    strip_prefix: true       # 移除 /nvidia 前缀
+    min_size: 1
+    concurrency: 20
+    chunk_size: 10485760     # 10MB，CUDA 包很大
+
+  # ========== PyTorch 相关规则 ==========
+  # 注意：更具体的路径前缀要放在前面
+  # PyTorch R2 CDN /torch-r2/ -> download-r2.pytorch.org/（移除 /torch-r2 前缀）
+  - name: pytorch-r2
+    path_prefix: "/torch-r2"
+    upstream: "https://download-r2.pytorch.org"
+    strategy: parallel
+    strip_prefix: true
+    min_size: 1
+    concurrency: 20
+    chunk_size: 10485760
+
+  # PyTorch 主站 /torch/ -> download.pytorch.org/（移除 /torch 前缀）
+  - name: pytorch
+    path_prefix: "/torch"
+    upstream: "https://download.pytorch.org"
+    strategy: parallel
+    strip_prefix: true
+    min_size: 1
+    concurrency: 20
+    chunk_size: 10485760     # 10MB per chunk
+
+  # ========== Docker Registry 规则 ==========
   # Docker Registry 代理（/v2/ 和 /v2/auth 在代码中特殊处理）
   - name: docker-blob
     pattern: "/v2/.*/blobs/sha256:[a-f0-9]+"
     upstream: "https://registry-1.docker.io"
     strategy: parallel
-    min_size: 1       # all
+    min_size: 1
     concurrency: 20
-    chunk_size: 1048576     # 1MB per chunk
+    chunk_size: 1048576      # 1MB per chunk
+
   - name: docker-registry
     pattern: "/v2/.*"
     upstream: "https://registry-1.docker.io"
     strategy: proxy
-    handler: handlers.docker  # 特殊处理模块路径
-    
-  - name: pip-packages
-    pattern: "/packages/.+\\.(whl|tar\\.gz|zip)$"
-    upstream: "https://pypi.org"
-    strategy: parallel
-    min_size: 1       # all
-    concurrency: 20
-    chunk_size: 5242880      # 5MB per chunk
-    
+    handler: handlers.docker
+
+  # ========== R 包规则 ==========
   - name: r-package
-    pattern: "/src/contrib/.*"
+    path_prefix: "/src/contrib"
     upstream: "https://cran.r-project.org"
     strategy: parallel
-    min_size: 102400       # 100K
+    min_size: 102400
     concurrency: 20
     chunk_size: 5242880
 
+  # ========== HuggingFace 规则 ==========
   - name: huggingface-files
     pattern: '/.*/(blob|resolve)/[^/]+/.+'
     upstream: "https://huggingface.co"
     strategy: parallel
-    min_size: 102400       #100k
+    min_size: 102400
     concurrency: 20
-    chunk_size: 10485760    # 10MB per chunk
-    cache_key_source: original  # 使用原始 URL 作为缓存 key（避免临时签名影响缓存命中）
+    chunk_size: 10485760
+    cache_key_source: original
     path_rewrite:
       - search: "/blob/"
         replace: "/resolve/"
-    # HEAD 请求时需要额外保留的响应头（用于元数据获取）
     head_meta_headers:
       - "x-repo-commit"
       - "x-linked-etag"
@@ -65,26 +122,11 @@ rules:
     upstream: "https://huggingface.co"
     strategy: proxy
 
-  # 示例：其他使用临时签名 URL 的站点
-  # - name: example-signed-url
-  #   pattern: '/signed-download/.*'
-  #   upstream: "https://example.com"
-  #   strategy: parallel
-  #   min_size: 10485760
-  #   concurrency: 10
-  #   cache_key_source: original  # 使用原始 URL 作为缓存 key
-
+  # ========== 默认规则 ==========
   - name: default
-    pattern: ".*"
+    path_prefix: "/"
     upstream: "https://pypi.org"
     strategy: proxy
-    content_rewrite:         # 响应内容改写配置
-      content_types:         # 匹配的 Content-Type（HTML 和 JSON）
-        - "text/html"
-        - "application/json"
-        - "application/vnd.pypi.simple"
-      targets:               # 要替换的目标 host 列表
-        - "https://files.pythonhosted.org"
 
 logging:
   level: "INFO"

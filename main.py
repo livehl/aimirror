@@ -118,7 +118,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-async def _proxy_request(request: Request, target_url: str, rule: Rule = None) -> Response:
+async def _proxy_request(request: Request, target_url: str, rule: Rule = None, processed_path: str = None) -> Response:
     """直接代理转发请求，支持内容改写"""
     headers = {k: v for k, v in request.headers.items()
                if k.lower() not in ['host', 'connection', 'content-length']}
@@ -142,9 +142,8 @@ async def _proxy_request(request: Request, target_url: str, rule: Rule = None) -
         content = await resp.aread()
         content_type = resp.headers.get('content-type', '')
 
-        # 根据 Content-Type 改写内容中的 URL
-        if rule:
-            content = _rewrite_content_urls(content, rule, content_type)
+        # 根据 Content-Type 改写内容中的 URL（使用全局配置）
+        content = _rewrite_content_urls(content, content_type)
 
         # 过滤掉可能导致问题的响应头
         response_headers = {k: v for k, v in resp.headers.items()
@@ -160,25 +159,25 @@ async def _proxy_request(request: Request, target_url: str, rule: Rule = None) -
         )
 
 
-def _rewrite_content_urls(content: bytes, rule: Rule, content_type: str) -> bytes:
-    """改写响应内容中的上游 URL 为代理 URL
+def _rewrite_content_urls(content: bytes, content_type: str) -> bytes:
+    """改写响应内容中的上游 URL 为代理 URL（使用全局 content_rewrite 配置）
     
     Args:
         content: 响应内容
-        rule: 匹配的规则
         content_type: 响应的 Content-Type
     """
-    # 如果没有配置 content_rewrite，不进行改写
-    if not rule.content_rewrite:
+    # 获取全局 content_rewrite 配置
+    global_rewrite = config.get('content_rewrite', {})
+    if not global_rewrite:
         return content
     
     # 检查 Content-Type 是否匹配（支持 HTML 和 JSON）
-    content_types = rule.content_rewrite.get('content_types', [])
+    content_types = global_rewrite.get('content_types', [])
     if not any(ct in content_type for ct in content_types):
         return content
     
     # 获取要替换的目标 host 列表
-    targets = rule.content_rewrite.get('targets', [])
+    targets = global_rewrite.get('targets', [])
     if not targets:
         return content
     
@@ -486,8 +485,12 @@ async def proxy_handler(request: Request, full_path: str):
     logging.info(f"Received request: {request.method} {full_path}")
     
     # 路由匹配（使用 full_path 而不是 request.url.path）
-    rule = router.match('/' + full_path, content_length=None)
-    logging.info(f"Matched rule: {rule.name if rule else None}, strategy: {rule.strategy if rule else None}")
+    match_result = router.match('/' + full_path, content_length=None)
+    if match_result:
+        rule, processed_path = match_result
+    else:
+        rule, processed_path = None, '/' + full_path
+    logging.info(f"Matched rule: {rule.name if rule else None}, strategy: {rule.strategy if rule else None}, processed_path: {processed_path}")
     
     # === Handler 特殊处理 ===
     # 如果规则配置了 handler，先调用 handler 的 exec_path 函数
@@ -510,29 +513,29 @@ async def proxy_handler(request: Request, full_path: str):
     if not rule:
         raise HTTPException(404, "No matching rule found")
     
-    # 构建目标 URL
-    target_url = rule.build_target_url('/' + full_path)
+    # 构建目标 URL（使用处理后的路径）
+    target_url = f"{rule.upstream}{processed_path}"
     
     logging.info(f"Target URL: {target_url}")
     
     if rule.strategy == 'proxy':
         logging.info("Using proxy strategy")
-        return await _proxy_request(request, target_url, rule)
+        return await _proxy_request(request, target_url, rule, processed_path)
     
     if rule.strategy == 'parallel':
         # HEAD 请求只做转发，不进行并行下载
         if request.method == 'HEAD':
             logging.info("HEAD request, using proxy strategy")
-            return await _proxy_request(request, target_url, rule)
+            return await _proxy_request(request, target_url, rule, processed_path)
         # 仅 GET 支持并行下载
         if request.method != 'GET':
             logging.info(f"Method {request.method} not supported for parallel, using proxy")
-            return await _proxy_request(request, target_url, rule)
+            return await _proxy_request(request, target_url, rule, processed_path)
         logging.info("Using parallel download strategy")
         return await _parallel_download(request, target_url, rule)
     
     # fallback
-    return await _proxy_request(request, target_url, rule)
+    return await _proxy_request(request, target_url, rule, processed_path)
 
 def main():
     """CLI入口点"""

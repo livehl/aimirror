@@ -28,6 +28,7 @@ class TestRouter:
             {
                 'name': 'docker-blob',
                 'pattern': '/v2/.*/blobs/sha256:[a-f0-9]+',
+                'upstream': 'https://registry-1.docker.io',
                 'strategy': 'parallel',
                 'min_size': 1024000,
                 'concurrency': 20,
@@ -48,7 +49,8 @@ class TestRouter:
         rules = [
             {
                 'name': 'pip-wheel',
-                'pattern': '/packages/.+\\.whl$',
+                'pattern': r'/packages/.+\.whl$',
+                'upstream': 'https://files.pythonhosted.org',
                 'strategy': 'parallel',
                 'min_size': 1024000,
                 'concurrency': 20,
@@ -58,7 +60,10 @@ class TestRouter:
         router = Router(rules)
         
         # 应该匹配
-        assert router.match('/packages/torch/torch-2.0.0-cp310-cp310-linux_x86_64.whl', 2000000) is not None
+        result = router.match('/packages/torch/torch-2.0.0-cp310-cp310-linux_x86_64.whl', 2000000)
+        assert result is not None
+        rule, processed_path = result
+        assert rule.name == 'pip-wheel'
         
         # 不应该匹配
         assert router.match('/simple/torch/', None) is None
@@ -68,7 +73,8 @@ class TestRouter:
         rules = [
             {
                 'name': 'huggingface-gguf',
-                'pattern': '/.*/(blob|resolve)/main/.+\\.gguf$',
+                'pattern': r'/.*/(blob|resolve)/main/.+\.gguf$',
+                'upstream': 'https://huggingface.co',
                 'strategy': 'parallel',
                 'min_size': 1024000,
                 'concurrency': 20,
@@ -79,21 +85,23 @@ class TestRouter:
         router = Router(rules)
         
         # 应该匹配 blob 路径
-        rule = router.match('/unsloth/Qwen3.5-0.8B-GGUF/blob/main/Qwen3.5-0.8B-UD-Q2_K_XL.gguf', 400000000)
-        assert rule is not None
+        result = router.match('/unsloth/Qwen3.5-0.8B-GGUF/blob/main/Qwen3.5-0.8B-UD-Q2_K_XL.gguf', 400000000)
+        assert result is not None
+        rule, processed_path = result
         assert rule.name == 'huggingface-gguf'
         assert rule.cache_key_source == 'original'
         
         # 应该匹配 resolve 路径
-        rule = router.match('/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-UD-Q2_K_XL.gguf', 400000000)
-        assert rule is not None
+        result = router.match('/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-UD-Q2_K_XL.gguf', 400000000)
+        assert result is not None
         
     def test_default_rule(self):
         """测试默认规则"""
         rules = [
             {
                 'name': 'pip-wheel',
-                'pattern': '/packages/.+\\.whl$',
+                'pattern': r'/packages/.+\.whl$',
+                'upstream': 'https://files.pythonhosted.org',
                 'strategy': 'parallel',
                 'min_size': 1024000,
                 'concurrency': 20,
@@ -102,16 +110,58 @@ class TestRouter:
             {
                 'name': 'default',
                 'pattern': '.*',
+                'upstream': 'https://pypi.org',
                 'strategy': 'proxy'
             }
         ]
         router = Router(rules)
         
         # 不匹配任何特定规则时应该返回 default
-        rule = router.match('/some/random/path', None)
-        assert rule is not None
+        result = router.match('/some/random/path', None)
+        assert result is not None
+        rule, processed_path = result
         assert rule.name == 'default'
         assert rule.strategy == 'proxy'
+        
+    def test_path_prefix_with_strip(self):
+        """测试路径前缀匹配和 strip_prefix"""
+        rules = [
+            {
+                'name': 'nvidia-packages',
+                'path_prefix': '/nvidia',
+                'upstream': 'https://pypi.nvidia.com',
+                'strategy': 'parallel',
+                'strip_prefix': True,
+                'min_size': 1,
+                'concurrency': 20,
+                'chunk_size': 10485760
+            },
+            {
+                'name': 'pytorch',
+                'path_prefix': '/torch',
+                'upstream': 'https://download.pytorch.org',
+                'strategy': 'parallel',
+                'strip_prefix': True,
+                'min_size': 1,
+                'concurrency': 20,
+                'chunk_size': 10485760
+            }
+        ]
+        router = Router(rules)
+        
+        # 测试 nvidia 路径（应该移除 /nvidia 前缀）
+        result = router.match('/nvidia/nvidia-cudnn-cu12/', None)
+        assert result is not None
+        rule, processed_path = result
+        assert rule.name == 'nvidia-packages'
+        assert processed_path == '/nvidia-cudnn-cu12/'
+        
+        # 测试 pytorch 路径（应该移除 /torch 前缀）
+        result = router.match('/torch/whl/cu126/torch/', None)
+        assert result is not None
+        rule, processed_path = result
+        assert rule.name == 'pytorch'
+        assert processed_path == '/whl/cu126/torch/'
 
 
 class TestCacheManager:
@@ -227,7 +277,8 @@ class TestCacheKeySource:
         """测试配置 cache_key_source 为 original"""
         rule = Rule(
             name='huggingface-gguf',
-            pattern='/.*/(blob|resolve)/main/.+\\.gguf$',
+            pattern=r'/.*/(blob|resolve)/main/.+\.gguf$',
+            upstream='https://huggingface.co',
             strategy='parallel',
             cache_key_source='original'
         )
@@ -238,6 +289,7 @@ class TestCacheKeySource:
         rule = Rule(
             name='docker-blob',
             pattern='/v2/.*/blobs/sha256:[a-f0-9]+',
+            upstream='https://registry-1.docker.io',
             strategy='parallel'
         )
         assert rule.cache_key_source == 'final'
@@ -272,6 +324,7 @@ class TestIntegration:
                 {
                     'name': 'docker-blob',
                     'pattern': '/v2/.*/blobs/sha256:[a-f0-9]+',
+                    'upstream': 'https://registry-1.docker.io',
                     'strategy': 'parallel',
                     'min_size': 1024000,
                     'concurrency': 20,
@@ -279,7 +332,8 @@ class TestIntegration:
                 },
                 {
                     'name': 'huggingface-gguf',
-                    'pattern': '/.*/(blob|resolve)/main/.+\\.gguf$',
+                    'pattern': r'/.*/(blob|resolve)/main/.+\.gguf$',
+                    'upstream': 'https://huggingface.co',
                     'strategy': 'parallel',
                     'min_size': 1024000,
                     'concurrency': 20,
@@ -289,6 +343,7 @@ class TestIntegration:
                 {
                     'name': 'default',
                     'pattern': '.*',
+                    'upstream': 'https://pypi.org',
                     'strategy': 'proxy'
                 }
             ],
@@ -303,11 +358,15 @@ class TestIntegration:
         assert len(router.rules) == 3
         
         # 验证 HuggingFace 规则有正确的 cache_key_source
-        hf_rule = router.match('/unsloth/model/blob/main/file.gguf', 400000000)
+        result = router.match('/unsloth/model/blob/main/file.gguf', 400000000)
+        assert result is not None
+        hf_rule, _ = result
         assert hf_rule.cache_key_source == 'original'
         
         # 验证 Docker 规则使用默认 cache_key_source
-        docker_rule = router.match('/v2/library/nginx/blobs/sha256:abc123', 2000000)
+        result = router.match('/v2/library/nginx/blobs/sha256:abc123', 2000000)
+        assert result is not None
+        docker_rule, _ = result
         assert docker_rule.cache_key_source == 'final'
 
 

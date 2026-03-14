@@ -7,6 +7,8 @@ import sys
 import tempfile
 import shutil
 
+from starlette.background import P
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from router import Router, Rule
@@ -50,21 +52,24 @@ def test_router():
     router = Router(rules)
     
     # 测试 Docker 规则
-    rule = router.match('/v2/library/nginx/blobs/sha256:abc123', 2000000)
-    assert rule is not None, "Docker 规则应该匹配"
+    result = router.match('/v2/library/nginx/blobs/sha256:abc123', 2000000)
+    assert result is not None, "Docker 规则应该匹配"
+    rule, processed_path = result
     assert rule.name == 'docker-blob', f"预期 docker-blob，实际 {rule.name}"
     print("✓ Docker blob 规则匹配成功")
     
     # 测试 HuggingFace 规则
-    rule = router.match('/unsloth/Qwen3.5-0.8B-GGUF/blob/main/file.gguf', 400000000)
-    assert rule is not None, "HuggingFace 规则应该匹配"
+    result = router.match('/unsloth/Qwen3.5-0.8B-GGUF/blob/main/file.gguf', 400000000)
+    assert result is not None, "HuggingFace 规则应该匹配"
+    rule, processed_path = result
     assert rule.name == 'huggingface-gguf', f"预期 huggingface-gguf，实际 {rule.name}"
     assert rule.cache_key_source == 'original', f"预期 cache_key_source=original，实际 {rule.cache_key_source}"
     print("✓ HuggingFace 规则匹配成功")
     
     # 测试默认规则
-    rule = router.match('/some/random/path', None)
-    assert rule is not None, "默认规则应该匹配"
+    result = router.match('/some/random/path', None)
+    assert result is not None, "默认规则应该匹配"
+    rule, processed_path = result
     assert rule.name == 'default', f"预期 default，实际 {rule.name}"
     print("✓ 默认规则匹配成功")
     
@@ -227,13 +232,13 @@ def test_end_to_end():
     # 2. 启动服务
     print("\n[2/5] 启动 fast_proxy 服务...")
     proc = subprocess.Popen(
-        ['python3', 'main.py'],
+        ['/bin/python3', 'main.py'],
         cwd='/data/fast_proxy',
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         preexec_fn=os.setsid
     )
-    
+
     # 等待服务启动（重试机制）
     print("  等待服务启动...")
     max_retries = 10
