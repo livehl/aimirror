@@ -65,7 +65,7 @@ upstream_proxy: Optional[str] = None  # 上游代理配置
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    global config, router, cache, http_client, download_semaphore
+    global config, router, cache, http_client, download_semaphore, sequential_download_semaphore
     
     # 加载配置
     config_path = Path(__file__).parent / "config.yaml"
