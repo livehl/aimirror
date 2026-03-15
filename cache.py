@@ -1,14 +1,16 @@
 """
 缓存管理器 - 基于文件 digest + LRU 淘汰
+支持分块下载的断点续传缓存
 """
 import os
 import hashlib
 import sqlite3
 import shutil
 import asyncio
+import json
 from pathlib import Path
-from typing import Optional
-from datetime import datetime
+from typing import Optional, List, Dict
+from datetime import datetime, timedelta
 
 class CacheManager:
     def __init__(self, cache_dir: str, max_size_gb: float = 100):
@@ -22,6 +24,7 @@ class CacheManager:
         """初始化 SQLite 元数据表"""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
+        # 文件缓存表
         c.execute('''
             CREATE TABLE IF NOT EXISTS files (
                 digest TEXT PRIMARY KEY,
@@ -32,6 +35,24 @@ class CacheManager:
             )
         ''')
         c.execute('CREATE INDEX IF NOT EXISTS idx_accessed ON files(accessed)')
+        
+        # 分块下载缓存表
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL,
+                total_size INTEGER NOT NULL,
+                chunk_start INTEGER NOT NULL,
+                chunk_end INTEGER NOT NULL,
+                downloaded INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(url, chunk_start, chunk_end)
+            )
+        ''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_chunks_url ON chunks(url)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_chunks_updated ON chunks(updated_at)')
+        
         conn.commit()
         conn.close()
     
@@ -127,3 +148,82 @@ class CacheManager:
             "first_cached": first,
             "last_accessed": last
         }
+    
+    # ========== 分块下载缓存管理 ==========
+    
+    def get_downloaded_chunks(self, url: str, total_size: int, chunk_ttl_hours: int = 48) -> List[Dict]:
+        """
+        获取已下载的分块列表
+        只返回在有效期内且 total_size 匹配的 chunk
+        """
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        # 计算过期时间
+        expire_time = datetime.now() - timedelta(hours=chunk_ttl_hours)
+        
+        c.execute('''
+            SELECT chunk_start, chunk_end, downloaded, updated_at FROM chunks
+            WHERE url = ? AND total_size = ? AND updated_at > ? AND downloaded = 1
+            ORDER BY chunk_start
+        ''', (url, total_size, expire_time.isoformat()))
+        
+        rows = c.fetchall()
+        conn.close()
+        
+        chunks = []
+        for row in rows:
+            chunks.append({
+                'start': row[0],
+                'end': row[1],
+                'downloaded': row[2] == 1,
+                'updated_at': row[3]
+            })
+        return chunks
+    
+    def mark_chunk_downloaded(self, url: str, total_size: int, chunk_start: int, chunk_end: int):
+        """标记分块已下载完成"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO chunks (url, total_size, chunk_start, chunk_end, downloaded, updated_at)
+            VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+            ON CONFLICT(url, chunk_start, chunk_end) DO UPDATE SET
+                downloaded = 1,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (url, total_size, chunk_start, chunk_end))
+        conn.commit()
+        conn.close()
+    
+    def mark_chunk_pending(self, url: str, total_size: int, chunk_start: int, chunk_end: int):
+        """标记分块为待下载状态（用于恢复下载时）"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO chunks (url, total_size, chunk_start, chunk_end, downloaded, updated_at)
+            VALUES (?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
+            ON CONFLICT(url, chunk_start, chunk_end) DO UPDATE SET
+                downloaded = 0,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (url, total_size, chunk_start, chunk_end))
+        conn.commit()
+        conn.close()
+    
+    def clear_chunks_for_url(self, url: str):
+        """清除指定 URL 的所有分块记录"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('DELETE FROM chunks WHERE url = ?', (url,))
+        conn.commit()
+        conn.close()
+    
+    def cleanup_expired_chunks(self, chunk_ttl_hours: int = 48):
+        """清理过期的分块记录"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        expire_time = datetime.now() - timedelta(hours=chunk_ttl_hours)
+        c.execute('DELETE FROM chunks WHERE updated_at < ?', (expire_time.isoformat(),))
+        deleted = c.rowcount
+        conn.commit()
+        conn.close()
+        return deleted

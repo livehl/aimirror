@@ -390,7 +390,8 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
         temp_file = os.path.join(config['cache']['dir'], f"tmp_{url_hash}")
         
         try:
-            # 创建下载器，启用流式模式
+            # 创建下载器，启用流式模式和断点续传
+            chunk_ttl = config.get('cache', {}).get('chunk_ttl_hours', 48)
             downloader = ParallelDownloader(
                 url=final_url,
                 filepath=temp_file,
@@ -398,7 +399,9 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
                 chunk_size=rule.chunk_size,
                 proxy=config['server'].get('upstream_proxy'),
                 headers=headers if auth_header else None,
-                stream_mode=True  # 启用流式模式
+                stream_mode=True,  # 启用流式模式
+                cache_manager=cache,  # 启用断点续传缓存
+                chunk_ttl_hours=chunk_ttl
             )
             
             # 启动后台下载任务

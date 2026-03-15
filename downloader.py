@@ -1,5 +1,5 @@
 """
-多线程分片下载器 - 支持 HTTP Range 并行下载
+多线程分片下载器 - 支持 HTTP Range 并行下载和断点续传
 """
 import os
 import logging
@@ -7,7 +7,7 @@ import aiohttp
 import aiofiles
 import asyncio
 import hashlib
-from typing import Optional, List
+from typing import Optional, List, Set
 from dataclasses import dataclass
 
 @dataclass
@@ -15,11 +15,13 @@ class Chunk:
     start: int
     end: int
     data: Optional[bytes] = None
+    downloaded: bool = False
 
 class ParallelDownloader:
     def __init__(self, url: str, filepath: str, concurrency: int = 4, 
                  chunk_size: int = 5*1024*1024, proxy: Optional[str] = None,
-                 headers: Optional[dict] = None, stream_mode: bool = False):
+                 headers: Optional[dict] = None, stream_mode: bool = False,
+                 cache_manager = None, chunk_ttl_hours: int = 48):
         self.url = url
         self.filepath = filepath
         self.concurrency = concurrency
@@ -29,6 +31,8 @@ class ParallelDownloader:
         self.stream_mode = stream_mode  # 流式模式：边下载边写入文件
         self.total_size = 0
         self.chunks: List[Chunk] = []
+        self.cache_manager = cache_manager  # 缓存管理器，用于断点续传
+        self.chunk_ttl_hours = chunk_ttl_hours  # 分块缓存有效期（小时）
         
     async def _get_file_size(self, session: aiohttp.ClientSession) -> int:
         """获取文件总大小，检查是否支持 Range"""
@@ -55,8 +59,13 @@ class ParallelDownloader:
         return chunks
     
     async def _download_chunk(self, session: aiohttp.ClientSession, chunk: Chunk, sem: asyncio.Semaphore, retry: int = 3):
-        """下载单个分片，带重试机制"""
+        """下载单个分片，带重试机制和断点续传记录"""
         async with sem:
+            # 如果已经下载过，跳过
+            if chunk.downloaded:
+                logging.debug(f"Chunk {chunk.start}-{chunk.end} already downloaded, skipping")
+                return
+                
             headers = dict(self.headers)
             headers['Range'] = f'bytes={chunk.start}-{chunk.end}'
             
@@ -65,11 +74,22 @@ class ParallelDownloader:
                     async with session.get(self.url, headers=headers, proxy=self.proxy) as resp:
                         if resp.status == 206:
                             chunk.data = await resp.read()
+                            chunk.downloaded = True
+                            # 记录到缓存
+                            if self.cache_manager:
+                                self.cache_manager.mark_chunk_downloaded(
+                                    self.url, self.total_size, chunk.start, chunk.end
+                                )
                             return
                         elif resp.status == 200:
                             # 服务器不支持 Range，返回完整内容（只接受第一个分片）
                             if chunk.start == 0:
                                 chunk.data = await resp.read()
+                                chunk.downloaded = True
+                                if self.cache_manager:
+                                    self.cache_manager.mark_chunk_downloaded(
+                                        self.url, self.total_size, chunk.start, chunk.end
+                                    )
                                 return
                             raise RuntimeError(f"Server returned 200 instead of 206 for range request")
                         else:
@@ -93,7 +113,7 @@ class ParallelDownloader:
         return sha256.hexdigest() == expected_sha256
     
     async def download(self, expected_sha256: Optional[str] = None) -> str:
-        """执行并行下载，返回文件路径"""
+        """执行并行下载（支持断点续传），返回文件路径"""
         # 确保目录存在
         os.makedirs(os.path.dirname(self.filepath) or '.', exist_ok=True)
         
@@ -114,32 +134,70 @@ class ParallelDownloader:
             actual_chunk_size = self.chunks[0].end - self.chunks[0].start + 1 if self.chunks else 0
             logging.info(f"Split into {len(self.chunks)} chunks, actual chunk size: {actual_chunk_size / 1024 / 1024:.1f}MB")
             
-            # 4. 并发下载
+            # 4. 检查已下载的分块（断点续传）
+            downloaded_ranges: Set[tuple] = set()
+            if self.cache_manager:
+                cached_chunks = self.cache_manager.get_downloaded_chunks(
+                    self.url, self.total_size, self.chunk_ttl_hours
+                )
+                for cached in cached_chunks:
+                    downloaded_ranges.add((cached['start'], cached['end']))
+                    # 标记 chunk 为已下载
+                    for chunk in self.chunks:
+                        if chunk.start == cached['start'] and chunk.end == cached['end']:
+                            chunk.downloaded = True
+                            break
+                
+                skipped = sum(1 for c in self.chunks if c.downloaded)
+                if skipped > 0:
+                    logging.info(f"Resuming download: {skipped}/{len(self.chunks)} chunks already cached (within {self.chunk_ttl_hours}h)")
+            
+            # 5. 并发下载（跳过已下载的）
             sem = asyncio.Semaphore(self.concurrency)
-            tasks = [self._download_chunk(session, chunk, sem) for chunk in self.chunks]
+            pending_chunks = [c for c in self.chunks if not c.downloaded]
             
-            # 显示进度
-            completed = 0
-            for task in asyncio.as_completed(tasks):
-                await task
-                completed += 1
-                if completed % max(1, len(self.chunks) // 10) == 0 or completed == len(self.chunks):
-                    progress = completed / len(self.chunks) * 100
-                    logging.info(f"Download progress: {progress:.1f}% ({completed}/{len(self.chunks)} chunks)")
+            if pending_chunks:
+                tasks = [self._download_chunk(session, chunk, sem) for chunk in pending_chunks]
+                
+                # 显示进度
+                completed = sum(1 for c in self.chunks if c.downloaded)
+                total_pending = len(pending_chunks)
+                
+                for task in asyncio.as_completed(tasks):
+                    try:
+                        await task
+                        completed += 1
+                        if total_pending > 0 and (completed % max(1, len(self.chunks) // 10) == 0 or completed == len(self.chunks)):
+                            progress = completed / len(self.chunks) * 100
+                            logging.info(f"Download progress: {progress:.1f}% ({completed}/{len(self.chunks)} chunks)")
+                    except Exception as e:
+                        logging.error(f"Chunk download failed: {e}")
+                        raise
+            else:
+                logging.info("All chunks already downloaded, skipping download")
             
-            # 5. 按序写入文件
+            # 6. 按序写入文件（只写入新下载的）
             logging.info("Writing chunks to file...")
             async with aiofiles.open(self.filepath, 'r+b') as f:
                 for chunk in sorted(self.chunks, key=lambda c: c.start):
-                    await f.seek(chunk.start)
-                    await f.write(chunk.data)
+                    if chunk.data is not None:  # 只写入本次下载的数据
+                        await f.seek(chunk.start)
+                        await f.write(chunk.data)
             
-            # 6. 校验
+            # 7. 校验
             if expected_sha256:
                 logging.info("Verifying file digest...")
                 if not await self._verify_digest(expected_sha256):
+                    # 校验失败，清除 chunk 缓存，下次重新下载
+                    if self.cache_manager:
+                        self.cache_manager.clear_chunks_for_url(self.url)
                     os.remove(self.filepath)
                     raise RuntimeError("Digest verification failed")
+            
+            # 8. 下载成功，清除 chunk 缓存
+            if self.cache_manager:
+                self.cache_manager.clear_chunks_for_url(self.url)
+                logging.info("Cleared chunk cache after successful download")
             
             logging.info(f"Download completed: {self.filepath}")
         

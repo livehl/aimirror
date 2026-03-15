@@ -10,6 +10,7 @@ cache:
   dir: "/data/fast_proxy/cache"
   max_size_gb: 100
   lru_enabled: true
+  chunk_ttl_hours: 48  # 分块下载缓存有效期（小时），断点续传使用
 
 # 全局内容改写配置（所有响应都会应用）
 content_rewrite:
